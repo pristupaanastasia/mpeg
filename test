@@ -1,0 +1,4 @@
+
+FFMPEG  -i "rtsp://<url>:<port>/<blah>/<stream>" -f mpegts -codec:v mpeg1video -b:v 800k -r 30 file.ts
+
+ffmpeg -re -i rtmp://stage-2-vs.facecast.net/publisher/apristupa?sharedkey=6kcjer -vcodec mpeg2video -s 720x576 -r 25 -b:v 2M -acodec mp2 -ac 2 -b:a 192k -f mpegts udp://127.0.0.1:1234?pkt_size=188
