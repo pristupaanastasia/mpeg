@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"github.com/Comcast/gots/packet"
+	"github.com/Comcast/gots/packet/adaptationfield"
 	"github.com/Comcast/gots/pes"
 	"github.com/Comcast/gots/psi"
 	"github.com/pkg/errors"
@@ -73,7 +74,7 @@ func MpegTeg(r io.Reader) error {
 
 		}
 
-		if packet.ContainsAdaptationField(pkt) && packet.PayloadUnitStartIndicator(pkt) {
+		if packet.PayloadUnitStartIndicator(pkt) {
 			data, err := packet.PESHeader(pkt)
 			if err != nil {
 				log.Println(err)
@@ -86,6 +87,7 @@ func MpegTeg(r io.Reader) error {
 			}
 			//payload = new(packet.Packet)
 			payload[pkt.PID()] = *pkt
+
 			log.Println("PTS", pusi.PTS())
 			if PTS[pkt.PID()] == 0 {
 				PTS[pkt.PID()] = pusi.PTS()
@@ -95,7 +97,11 @@ func MpegTeg(r io.Reader) error {
 				}
 			}
 		}
-
+		if packet.ContainsAdaptationField(pkt){
+			log.Println(adaptationfield.IsRandomAccess(pkt))
+			// todo показывает что содержится keyframe
+			adaptationfield.
+		}
 		ts := packet.New()
 		ts.SetContinuityCounter(Cc[pkt.PID()])
 		if pkt.HasPayload() {
