@@ -97,10 +97,10 @@ func MpegTeg(r io.Reader) error {
 				}
 			}
 		}
-		if packet.ContainsAdaptationField(pkt){
+		if packet.ContainsAdaptationField(pkt) {
 			log.Println(adaptationfield.IsRandomAccess(pkt))
 			// todo показывает что содержится keyframe
-			adaptationfield.
+
 		}
 		ts := packet.New()
 		ts.SetContinuityCounter(Cc[pkt.PID()])
