@@ -11,26 +11,36 @@ import (
 	"io"
 	"log"
 	"os"
+	"strconv"
 )
 
 var Cc map[int]int
 var PTS map[int]uint64
 
-func MpegTeg(r io.Reader) error {
+func MpegTeg(r io.Reader, M3u8 io.Writer) error {
 	Cc = make(map[int]int, 0)
 	PTS = make(map[int]uint64, 0)
 	pktData := make([]byte, packet.PacketSize)
 	//var patPkt *packet.Packet
 	var pat psi.PAT
-	var pmtPkt *packet.Packet
+	pmtPkt := make(map[int]*packet.Packet)
+	var PAT *packet.Packet
 	pmtPids := make(map[int]psi.PmtElementaryStream)
-	payload := make(map[int]packet.Packet)
+	PUSI := make(map[int]pes.PESHeader)
 	pmtPid := 0
+	var ts []packet.Packet
+	ts = make([]packet.Packet, 0)
+	var i int
+	var name int
 
+	io.WriteString(M3u8, "#EXTM3U\n")
+	io.WriteString(M3u8, "#EXT-X-TARGETDURATION:10\n")
+	io.WriteString(M3u8, "#EXT-X-MEDIA-SEQUENCE:1\n")
 	for {
 		_, err := io.ReadFull(r, pktData)
 		if err != nil {
 			if err == io.EOF {
+				io.WriteString(M3u8, "#EXT-X-ENDLIST\n")
 				log.Println(err)
 				return err
 			}
@@ -42,14 +52,18 @@ func MpegTeg(r io.Reader) error {
 			return errors.WithMessage(err, "create packet from bytes")
 		}
 
-		if (pkt.ContinuityCounter()+1 != Cc[pkt.PID()] && pkt.ContinuityCounter() != 0) || (pkt.ContinuityCounter() == 0 && Cc[pkt.PID()] != 15) {
+		if (pkt.ContinuityCounter()-1 != Cc[pkt.PID()] && pkt.ContinuityCounter() != 0) || (pkt.ContinuityCounter() == 0 && Cc[pkt.PID()] != 15) {
 			//todo здесь будет вставка ошибки в hls - сс пропущен
+			log.Println("ошибка Сс")
+			pkt.SetTransportErrorIndicator(true)
 		}
 		Cc[pkt.PID()] = pkt.ContinuityCounter()
 		//fmt.Printf("mpeg %+v %v %v %v %v\n",pkt.CheckErrors(), pkt.HasPayload(), pkt.IsPAT(), pkt.PayloadUnitStartIndicator(),pkt.ContinuityCounter())
 		if packet.IsPat(pkt) {
+			PAT = pkt
 			pat, err = psi.ReadPAT(bytes.NewReader(pkt[:]))
 			//patPkt = pkt
+
 			if err != nil {
 				log.Println("pat", err)
 				return errors.WithMessage(err, "PAT")
@@ -62,31 +76,35 @@ func MpegTeg(r io.Reader) error {
 			}
 		}
 		if ok, _ := psi.IsPMT(pkt, pat); ok {
-			pmtPkt = pkt
-			PMT, err := psi.ReadPMT(bytes.NewReader(pmtPkt[:]), pmtPid)
+			pmtPkt[pmtPid] = pkt
+			PMT, err := psi.ReadPMT(bytes.NewReader(pkt[:]), pmtPid)
 			if err != nil {
 				log.Println("pmt", err)
 				return errors.WithMessage(err, "Pmt")
 			}
-			for i, pid := range PMT.Pids() {
-				pmtPids[pid] = PMT.ElementaryStreams()[i]
+			for val, pid := range PMT.Pids() {
+				pmtPids[pid] = PMT.ElementaryStreams()[val]
+				wr := "#EXTINF:-1," + PMT.ElementaryStreams()[val].StreamTypeDescription() + "\n"
+				io.WriteString(M3u8, wr)
 			}
-
 		}
+
+		ts = append(ts, *pkt)
 
 		if packet.PayloadUnitStartIndicator(pkt) {
 			data, err := packet.PESHeader(pkt)
 			if err != nil {
-				log.Println(err)
-				return err
+				log.Println("pes", err)
+				continue
 			}
 			pusi, err := pes.NewPESHeader(data)
+
 			if err != nil {
-				log.Println(err)
+				log.Println("pusi", err)
 				return err
 			}
 			//payload = new(packet.Packet)
-			payload[pkt.PID()] = *pkt
+			PUSI[pkt.PID()] = pusi
 
 			log.Println("PTS", pusi.PTS())
 			if PTS[pkt.PID()] == 0 {
@@ -94,37 +112,52 @@ func MpegTeg(r io.Reader) error {
 			} else {
 				if PTS[pkt.PID()] < pusi.PTS() {
 					//todo ошибка pts любого фрейма в чанке в в любом элементарном потоке больше, чем первый фрейм соответствующего элементарного потока.
+					pkt.SetTransportErrorIndicator(true)
+					log.Println("ошибка ПТС")
 				}
 			}
 		}
-		if packet.ContainsAdaptationField(pkt) {
-			log.Println(adaptationfield.IsRandomAccess(pkt))
+		if packet.ContainsAdaptationField(pkt) && packet.PayloadUnitStartIndicator(pkt) && adaptationfield.IsRandomAccess(pkt) {
+			log.Println("random access", adaptationfield.IsRandomAccess(pkt))
 			// todo показывает что содержится keyframe
+			var j int
 
-		}
-		ts := packet.New()
-		ts.SetContinuityCounter(Cc[pkt.PID()])
-		if pkt.HasPayload() {
-			val, err := pkt.Payload()
-			if err != nil {
-				log.Println(err)
-				return err
+			if len(ts) < 5 {
+				continue
 			}
-			ts.SetPayload(val)
-		}
-		if pkt.HasAdaptationField() {
-			val, err := ts.AdaptationField()
+			File, err := os.Create(strconv.Itoa(name) + ".ts")
 			if err != nil {
-				log.Println(err)
-				return err
+				log.Fatal(err)
 			}
-			log.Println("key frame")
-			log.Println(val.RandomAccess())
-			ts.SetAdaptationField(val)
+			name++
+			log.Println(File)
+			flag := false
+			File.Write(PAT[:])
+			File.Write(pmtPkt[pmtPid][:])
 
+			for j < len(ts) {
+				File.Write((&ts[j])[:])
+
+				if ts[j].TransportErrorIndicator() {
+					flag = true
+				}
+				//ts[i].SetPID(pkt.PID())
+				log.Println("j", j)
+				j++
+			}
+			File.Close()
+			if flag {
+				io.WriteString(M3u8, "#EXT-X-DISCONTINUITY\n")
+			}
+			io.WriteString(M3u8, "#EXTINF:10, no desc\n")
+			io.WriteString(M3u8, File.Name())
+			io.WriteString(M3u8, "\n")
+			ts = make([]packet.Packet, 0)
+			i = 0
+		} else {
+			i++
 		}
-		ts.SetPID(pkt.PID())
-		log.Println("ts", ts.PID(), ts.IsPAT(), ts.CheckErrors(), ts.HasPayload())
+		log.Println("i", i)
 	}
 
 }
@@ -138,7 +171,13 @@ func main() {
 		return
 	}
 	defer f.Close()
-	go MpegTeg(f)
+	File, err := os.Create(mpeg + ".m3u8")
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(File)
+	defer File.Close()
+	go MpegTeg(f, File)
 	for {
 
 	}
