@@ -21,21 +21,24 @@ func MpegTeg(r io.Reader, M3u8 io.Writer) error {
 	Cc = make(map[int]int, 0)
 	PTS = make(map[int]uint64, 0)
 	pktData := make([]byte, packet.PacketSize)
-	//var patPkt *packet.Packet
+
 	var pat psi.PAT
-	pmtPkt := make(map[int]*packet.Packet)
-	var PAT *packet.Packet
-	pmtPids := make(map[int]psi.PmtElementaryStream)
 	PUSI := make(map[int]pes.PESHeader)
+	PES := make(map[int]*packet.Packet)
 	pmtPid := 0
-	var ts []packet.Packet
-	ts = make([]packet.Packet, 0)
+	var PMT psi.PMT
+
 	var i int
 	var name int
-
+	var video int
 	io.WriteString(M3u8, "#EXTM3U\n")
 	io.WriteString(M3u8, "#EXT-X-TARGETDURATION:10\n")
 	io.WriteString(M3u8, "#EXT-X-MEDIA-SEQUENCE:1\n")
+	File, err := os.Create(strconv.Itoa(name) + ".ts")
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	for {
 		_, err := io.ReadFull(r, pktData)
 		if err != nil {
@@ -55,19 +58,17 @@ func MpegTeg(r io.Reader, M3u8 io.Writer) error {
 		if (pkt.ContinuityCounter()-1 != Cc[pkt.PID()] && pkt.ContinuityCounter() != 0) || (pkt.ContinuityCounter() == 0 && Cc[pkt.PID()] != 15) {
 			//todo здесь будет вставка ошибки в hls - сс пропущен
 			log.Println("ошибка Сс")
-			pkt.SetTransportErrorIndicator(true)
+			io.WriteString(M3u8, "#EXT-X-DISCONTINUITY\n")
 		}
 		Cc[pkt.PID()] = pkt.ContinuityCounter()
-		//fmt.Printf("mpeg %+v %v %v %v %v\n",pkt.CheckErrors(), pkt.HasPayload(), pkt.IsPAT(), pkt.PayloadUnitStartIndicator(),pkt.ContinuityCounter())
-		if packet.IsPat(pkt) {
-			PAT = pkt
-			pat, err = psi.ReadPAT(bytes.NewReader(pkt[:]))
-			//patPkt = pkt
 
+		if packet.IsPat(pkt) {
+			pat, err = psi.ReadPAT(bytes.NewReader(pkt[:]))
 			if err != nil {
 				log.Println("pat", err)
 				return errors.WithMessage(err, "PAT")
 			}
+
 			log.Println("PAT", pat.ProgramMap(), pkt.PID())
 			pmtPid, err = pat.SPTSpmtPID()
 			if err != nil {
@@ -75,89 +76,74 @@ func MpegTeg(r io.Reader, M3u8 io.Writer) error {
 				return errors.WithMessage(err, "Pmt pid")
 			}
 		}
-		if ok, _ := psi.IsPMT(pkt, pat); ok {
-			pmtPkt[pmtPid] = pkt
-			PMT, err := psi.ReadPMT(bytes.NewReader(pkt[:]), pmtPid)
-			if err != nil {
-				log.Println("pmt", err)
-				return errors.WithMessage(err, "Pmt")
-			}
-			for val, pid := range PMT.Pids() {
-				pmtPids[pid] = PMT.ElementaryStreams()[val]
-				wr := "#EXTINF:-1," + PMT.ElementaryStreams()[val].StreamTypeDescription() + "\n"
-				io.WriteString(M3u8, wr)
-			}
-		}
-
-		ts = append(ts, *pkt)
 
 		if packet.PayloadUnitStartIndicator(pkt) {
-			data, err := packet.PESHeader(pkt)
-			if err != nil {
-				log.Println("pes", err)
-				continue
-			}
-			pusi, err := pes.NewPESHeader(data)
+			if ok, _ := psi.IsPMT(pkt, pat); ok {
+				PMT, err = psi.ReadPMT(bytes.NewReader(pkt[:]), pmtPid)
+				if err != nil {
+					log.Println("pmt", err)
+					return errors.WithMessage(err, "Pmt")
+				}
 
-			if err != nil {
-				log.Println("pusi", err)
-				return err
-			}
-			//payload = new(packet.Packet)
-			PUSI[pkt.PID()] = pusi
-
-			log.Println("PTS", pusi.PTS())
-			if PTS[pkt.PID()] == 0 {
-				PTS[pkt.PID()] = pusi.PTS()
+				for val, _ := range PMT.Pids() {
+					wr := "#EXTINF:-1," + PMT.ElementaryStreams()[val].StreamTypeDescription() + "\n"
+					if PMT.ElementaryStreams()[val].IsVideoContent() {
+						video = PMT.ElementaryStreams()[val].ElementaryPid()
+					}
+					io.WriteString(M3u8, wr)
+				}
 			} else {
-				if PTS[pkt.PID()] < pusi.PTS() {
-					//todo ошибка pts любого фрейма в чанке в в любом элементарном потоке больше, чем первый фрейм соответствующего элементарного потока.
-					pkt.SetTransportErrorIndicator(true)
-					log.Println("ошибка ПТС")
+				data, err := packet.PESHeader(pkt)
+				if err != nil {
+					log.Println("pes", err)
+					continue
+				}
+				PES[pkt.PID()] = pkt
+				pusi, err := pes.NewPESHeader(data)
+
+				if err != nil {
+					log.Println("pusi", err)
+					return err
+				}
+				PUSI[pkt.PID()] = pusi
+
+				log.Println("PTS", pusi.PTS())
+				if PTS[pkt.PID()] == 0 {
+					PTS[pkt.PID()] = pusi.PTS()
+				} else {
+					if PTS[pkt.PID()] < pusi.PTS() {
+						//todo ошибка pts любого фрейма в чанке в в любом элементарном потоке больше, чем первый фрейм соответствующего элементарного потока.
+						io.WriteString(M3u8, "#EXT-X-DISCONTINUITY\n")
+						log.Println("ошибка ПТС")
+					}
 				}
 			}
 		}
-		if packet.ContainsAdaptationField(pkt) && packet.PayloadUnitStartIndicator(pkt) && adaptationfield.IsRandomAccess(pkt) {
+
+		if packet.ContainsAdaptationField(pkt) && packet.PayloadUnitStartIndicator(pkt) &&
+			adaptationfield.IsRandomAccess(pkt) &&
+			pkt.PID() == video {
+
 			log.Println("random access", adaptationfield.IsRandomAccess(pkt))
 			// todo показывает что содержится keyframe
-			var j int
 
-			if len(ts) < 5 {
-				continue
-			}
-			File, err := os.Create(strconv.Itoa(name) + ".ts")
-			if err != nil {
-				log.Fatal(err)
-			}
-			name++
-			log.Println(File)
-			flag := false
-			File.Write(PAT[:])
-			File.Write(pmtPkt[pmtPid][:])
-
-			for j < len(ts) {
-				File.Write((&ts[j])[:])
-
-				if ts[j].TransportErrorIndicator() {
-					flag = true
-				}
-				//ts[i].SetPID(pkt.PID())
-				log.Println("j", j)
-				j++
-			}
-			File.Close()
-			if flag {
-				io.WriteString(M3u8, "#EXT-X-DISCONTINUITY\n")
-			}
 			io.WriteString(M3u8, "#EXTINF:10, no desc\n")
 			io.WriteString(M3u8, File.Name())
 			io.WriteString(M3u8, "\n")
-			ts = make([]packet.Packet, 0)
+			File.Close()
+			name++
+			File, err = os.Create(strconv.Itoa(name) + ".ts")
+			if err != nil {
+				log.Fatal(err)
+			}
+
 			i = 0
 		} else {
 			i++
 		}
+		File.Write(pkt[:])
 		log.Println("i", i)
+
 	}
 
 }
