@@ -1,4 +1,4 @@
-# mpegts
+# mpegts to hls
 
 нарезка mpegts на hls
 
